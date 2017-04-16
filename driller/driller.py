@@ -12,6 +12,7 @@ import signal
 import resource
 import cPickle as pickle
 from itertools import islice, izip
+import hashlib
 
 import config #pylint:disable=relative-import
 
@@ -26,13 +27,15 @@ class Driller(object):
     Driller object, symbolically follows an input looking for new state transitions
     '''
 
-    def __init__(self, binary, input, fuzz_bitmap, tag=None, redis=None, hooks=None): #pylint:disable=redefined-builtin
+    def __init__(self, binary, input, fuzz_bitmap = "\xff" * 65535, tag=None, redis=None, hooks=None, argv=None): #pylint:disable=redefined-builtin
         '''
         :param binary: the binary to be traced
         :param input: input string to feed to the binary
-        :param fuzz_bitmap: AFL's bitmap of state transitions
+        :param fuzz_bitmap: AFL's bitmap of state transitions (defaults to empty)
         :param redis: redis.Redis instance for coordinating multiple Driller instances
         :param hooks: dictionary of addresses to simprocedures
+        :param argv: Optionally specify argv params (i,e,: ['./calc', 'parm1'])
+            defaults to binary name with no params.
         '''
 
         self.binary      = binary
@@ -42,6 +45,7 @@ class Driller(object):
         self.fuzz_bitmap = fuzz_bitmap
         self.tag         = tag
         self.redis       = redis
+        self.argv = argv or [binary]
 
         self.base = os.path.join(os.path.dirname(__file__), "..")
 
@@ -96,6 +100,12 @@ class Driller(object):
             # don't re-trace the same input
             return -1
 
+        # Write out debug info if desired
+        if l.level == logging.DEBUG and config.DEBUG_DIR:
+            self._write_debug_info()
+        elif l.level == logging.DEBUG and not config.DEBUG_DIR:
+            l.warning("Debug directory is not set. Will not log fuzzing bitmap.")
+
         # update traced
         if self.redis:
             self.redis.sadd(self.identifier + '-traced', self.input)
@@ -126,7 +136,7 @@ class Driller(object):
         '''
 
         # initialize the tracer
-        t = tracer.Tracer(self.binary, self.input, hooks=self._hooks)
+        t = tracer.Tracer(self.binary, self.input, hooks=self._hooks, argv=self.argv)
 
         self._set_concretizations(t)
         self._set_simproc_limits(t)
@@ -313,3 +323,15 @@ class Driller(object):
             l.info("generated: %s", generated.encode('hex'))
 
         return (key, generated)
+
+    def _write_debug_info(self):
+        m = hashlib.md5()
+        m.update(self.input)
+        f_name = os.path.join(config.DEBUG_DIR,
+                              self.identifier + '_' + m.hexdigest() + '.py')
+        with open(f_name, 'w+') as f:
+            l.debug("Wrote debug log to %s", f_name)
+            f.write("binary = %r\n" % self.binary +
+                    "started = '%s'\n" % time.ctime(self.start_time) +
+                    "input = %r\n" % self.input +
+                    "fuzz_bitmap = %r" % self.fuzz_bitmap)
